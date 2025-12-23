@@ -1,3 +1,0 @@
-jobs:
-  build:
-    runs-on: Larger GitHub-hosted runners
