@@ -109,207 +109,207 @@ jobs:
           GIT_COMMIT=${{ github.sha }}
 
   deploy:
-  name: Blue-Green Deployment
-  needs: build
-  runs-on: ubuntu-latest
-  if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-  
-  environment:
-    name: production
-    url: http://localhost
+    name: Blue-Green Deployment
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    environment:
+      name: production
+      url: http://localhost
 
-  steps:
-  - name: Checkout code
-    uses: actions/checkout@v4
-  
-  - name: Generate deployment tag
-    id: vars
-    run: |
-      SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-      echo "DEPLOY_TAG=sha-$SHORT_SHA" >> $GITHUB_ENV
-      echo "IMAGE_FULL_NAME=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$SHORT_SHA" >> $GITHUB_ENV
-  
-  - name: Set up SSH
-    uses: webfactory/ssh-agent@v0.9.0
-    with:
-      ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-  
-  - name: Test SSH connection
-    run: |
-      echo "Testing SSH connection..."
-      ssh -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=10 \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "echo '✅ SSH connection successful' && whoami"
-  
-  - name: Prepare deployment script
-    run: |
-      cat > deploy.sh << 'EOF'
-      #!/bin/bash
-      set -e
-      
-      echo "Starting blue-green deployment..."
-      echo "Image: ${{ env.IMAGE_FULL_NAME }}"
-      echo "Deploy tag: ${{ env.DEPLOY_TAG }}"
-      
-      cd /opt/web-calculator
-      
-      # 检查当前活动颜色
-      if docker-compose ps app_blue | grep -q "Up" && grep -q "max_fails" nginx/conf.d/default.conf | grep -q "app_blue"; then
-        CURRENT_COLOR="blue"
-        NEXT_COLOR="green"
-      else
-        CURRENT_COLOR="green"
-        NEXT_COLOR="blue"
-      fi
-      
-      echo "Current active: $CURRENT_COLOR"
-      echo "Deploying to: $NEXT_COLOR"
-      
-      # 更新环境变量
-      echo "GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}" > .env
-      if [ "$NEXT_COLOR" = "blue" ]; then
-        echo "BLUE_TAG=${{ env.DEPLOY_TAG }}" >> .env
-        echo "GREEN_TAG=latest" >> .env
-      else
-        echo "BLUE_TAG=latest" >> .env
-        echo "GREEN_TAG=${{ env.DEPLOY_TAG }}" >> .env
-      fi
-      
-      # 拉取新镜像
-      echo "Pulling new image..."
-      docker-compose pull app_${NEXT_COLOR}
-      
-      # 启动新版本
-      echo "Starting new version..."
-      docker-compose up -d app_${NEXT_COLOR}
-      
-      # 等待健康检查
-      echo "Waiting for health check..."
-      MAX_RETRIES=30
-      for i in $(seq 1 $MAX_RETRIES); do
-        if docker-compose ps app_${NEXT_COLOR} | grep -q "(healthy)"; then
-          echo "New version is healthy"
-          break
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Generate deployment tag
+      id: vars
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "DEPLOY_TAG=sha-$SHORT_SHA" >> $GITHUB_ENV
+        echo "IMAGE_FULL_NAME=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$SHORT_SHA" >> $GITHUB_ENV
+    
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+    
+    - name: Test SSH connection
+      run: |
+        echo "Testing SSH connection..."
+        ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "echo '✅ SSH connection successful' && whoami"
+    
+    - name: Prepare deployment script
+      run: |
+        cat > deploy.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        echo "Starting blue-green deployment..."
+        echo "Image: ${{ env.IMAGE_FULL_NAME }}"
+        echo "Deploy tag: ${{ env.DEPLOY_TAG }}"
+        
+        cd /opt/web-calculator
+        
+        # 检查当前活动颜色
+        if docker-compose ps app_blue | grep -q "Up" && grep -q "max_fails" nginx/conf.d/default.conf | grep -q "app_blue"; then
+          CURRENT_COLOR="blue"
+          NEXT_COLOR="green"
+        else
+          CURRENT_COLOR="green"
+          NEXT_COLOR="blue"
         fi
-        if [ $i -eq $MAX_RETRIES ]; then
-          echo "Health check failed after $MAX_RETRIES attempts"
+        
+        echo "Current active: $CURRENT_COLOR"
+        echo "Deploying to: $NEXT_COLOR"
+        
+        # 更新环境变量
+        echo "GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}" > .env
+        if [ "$NEXT_COLOR" = "blue" ]; then
+          echo "BLUE_TAG=${{ env.DEPLOY_TAG }}" >> .env
+          echo "GREEN_TAG=latest" >> .env
+        else
+          echo "BLUE_TAG=latest" >> .env
+          echo "GREEN_TAG=${{ env.DEPLOY_TAG }}" >> .env
+        fi
+        
+        # 拉取新镜像
+        echo "Pulling new image..."
+        docker-compose pull app_${NEXT_COLOR}
+        
+        # 启动新版本
+        echo "Starting new version..."
+        docker-compose up -d app_${NEXT_COLOR}
+        
+        # 等待健康检查
+        echo "Waiting for health check..."
+        MAX_RETRIES=30
+        for i in $(seq 1 $MAX_RETRIES); do
+          if docker-compose ps app_${NEXT_COLOR} | grep -q "(healthy)"; then
+            echo "New version is healthy"
+            break
+          fi
+          if [ $i -eq $MAX_RETRIES ]; then
+            echo "Health check failed after $MAX_RETRIES attempts"
+            exit 1
+          fi
+          echo "Attempt $i/$MAX_RETRIES: Waiting..."
+          sleep 2
+        done
+        
+        # 切换流量
+        echo "Switching traffic..."
+        if [ "$NEXT_COLOR" = "green" ]; then
+          sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        else
+          sed -i 's/server app_green:5000 max_fails=1 fail_timeout=5s;/server app_green:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        fi
+        
+        # 重新加载Nginx
+        echo "Reloading nginx..."
+        docker-compose exec -T proxy nginx -s reload
+        
+        # 等待旧版本停止（可选）
+        echo "Stopping old version in 60 seconds..."
+        (sleep 60 && docker-compose stop app_${CURRENT_COLOR}) &
+        
+        # 验证部署
+        echo "Verifying deployment..."
+        sleep 5
+        RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)
+        if [ "$RESPONSE" = "200" ]; then
+          echo "✅ Deployment successful!"
+          echo "Active version: $NEXT_COLOR"
+        else
+          echo "❌ Deployment verification failed"
           exit 1
         fi
-        echo "Attempt $i/$MAX_RETRIES: Waiting..."
-        sleep 2
-      done
-      
-      # 切换流量
-      echo "Switching traffic..."
-      if [ "$NEXT_COLOR" = "green" ]; then
-        sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
-        sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
-      else
-        sed -i 's/server app_green:5000 max_fails=1 fail_timeout=5s;/server app_green:5000;/' nginx/conf.d/default.conf
-        sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
-      fi
-      
-      # 重新加载Nginx
-      echo "Reloading nginx..."
-      docker-compose exec -T proxy nginx -s reload
-      
-      # 等待旧版本停止（可选）
-      echo "Stopping old version in 60 seconds..."
-      (sleep 60 && docker-compose stop app_${CURRENT_COLOR}) &
-      
-      # 验证部署
-      echo "Verifying deployment..."
-      sleep 5
-      RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)
-      if [ "$RESPONSE" = "200" ]; then
-        echo "✅ Deployment successful!"
-        echo "Active version: $NEXT_COLOR"
-      else
-        echo "❌ Deployment verification failed"
-        exit 1
-      fi
-      EOF
-      
-      chmod +x deploy.sh
-  
-  - name: Copy files to VM
-    run: |
-      # 创建远程目录
-      ssh -o StrictHostKeyChecking=no \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "mkdir -p /opt/web-calculator/nginx/conf.d"
-      
-      # 复制部署脚本
-      scp -o StrictHostKeyChecking=no \
-          deploy.sh \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/deploy.sh
-      
-      # 复制配置文件
-      scp -o StrictHostKeyChecking=no \
-          docker-compose.yml \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/
-      
-      scp -o StrictHostKeyChecking=no \
-          nginx/conf.d/default.conf \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/nginx/conf.d/
-      
-      # 设置部署脚本权限
-      ssh -o StrictHostKeyChecking=no \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "chmod +x /tmp/deploy.sh"
-  
-  - name: Execute deployment
-    run: |
-      ssh -o StrictHostKeyChecking=no \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "bash /tmp/deploy.sh"
-  
-  - name: Create rollback script on VM
-    run: |
-      cat > rollback.sh << 'EOF'
-      #!/bin/bash
-      set -e
-      
-      cd /opt/web-calculator
-      
-      # 检查当前活动颜色
-      if grep -q "app_blue.*max_fails" nginx/conf.d/default.conf; then
-        CURRENT="blue"
-        PREVIOUS="green"
-      else
-        CURRENT="green"
-        PREVIOUS="blue"
-      fi
-      
-      echo "Rolling back from $CURRENT to $PREVIOUS"
-      
-      # 切换回上一个版本
-      if [ "$PREVIOUS" = "green" ]; then
-        sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
-        sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
-      else
-        sed -i 's/server app_green:5000 max_fails=1 fail_timeout=5s;/server app_green:5000;/' nginx/conf.d/default.conf
-        sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
-      fi
-      
-      # 启动上一个版本（如果已停止）
-      docker-compose start app_${PREVIOUS}
-      
-      # 重新加载Nginx
-      docker-compose exec -T proxy nginx -s reload
-      
-      echo "Rollback completed to $PREVIOUS version"
-      EOF
-      
-      chmod +x rollback.sh
-      scp -o StrictHostKeyChecking=no \
-          rollback.sh \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/rollback.sh
-      
-      ssh -o StrictHostKeyChecking=no \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "chmod +x /opt/web-calculator/rollback.sh"
+        EOF
+        
+        chmod +x deploy.sh
+    
+    - name: Copy files to VM
+      run: |
+        # 创建远程目录
+        ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "mkdir -p /opt/web-calculator/nginx/conf.d"
+        
+        # 复制部署脚本
+        scp -o StrictHostKeyChecking=no \
+            deploy.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/deploy.sh
+        
+        # 复制配置文件
+        scp -o StrictHostKeyChecking=no \
+            docker-compose.yml \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/
+        
+        scp -o StrictHostKeyChecking=no \
+            nginx/conf.d/default.conf \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/nginx/conf.d/
+        
+        # 设置部署脚本权限
+        ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x /tmp/deploy.sh"
+    
+    - name: Execute deployment
+      run: |
+        ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "bash /tmp/deploy.sh"
+    
+    - name: Create rollback script on VM
+      run: |
+        cat > rollback.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        cd /opt/web-calculator
+        
+        # 检查当前活动颜色
+        if grep -q "app_blue.*max_fails" nginx/conf.d/default.conf; then
+          CURRENT="blue"
+          PREVIOUS="green"
+        else
+          CURRENT="green"
+          PREVIOUS="blue"
+        fi
+        
+        echo "Rolling back from $CURRENT to $PREVIOUS"
+        
+        # 切换回上一个版本
+        if [ "$PREVIOUS" = "green" ]; then
+          sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        else
+          sed -i 's/server app_green:5000 max_fails=1 fail_timeout=5s;/server app_green:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        fi
+        
+        # 启动上一个版本（如果已停止）
+        docker-compose start app_${PREVIOUS}
+        
+        # 重新加载Nginx
+        docker-compose exec -T proxy nginx -s reload
+        
+        echo "Rollback completed to $PREVIOUS version"
+        EOF
+        
+        chmod +x rollback.sh
+        scp -o StrictHostKeyChecking=no \
+            rollback.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/rollback.sh
+        
+        ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x /opt/web-calculator/rollback.sh"
 
   notification:
     name: Send Notification
