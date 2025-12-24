@@ -226,24 +226,52 @@ jobs:
         
         chmod +x deploy.sh
     
-    - name: Copy files to VM
-      timeout-minutes: 5
+    - name: Test SSH connection to VM
       env:
+        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
+        VM_HOST: ${{ secrets.VM_HOST }}
         VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}  # Ubuntu 默认用户通常是 'ubuntu'
       run: |
-        echo "Testing connection to $VM_USER@${{ secrets.VM_HOST }}..."
+        echo "Testing connection to $VM_USER@$VM_HOST..."
+        
+        # 先检查变量是否设置
+        if [ -z "$VM_HOST" ]; then
+          echo "ERROR: VM_HOST is empty!"
+          exit 1
+        fi
+        
+        if [ -z "$VM_USER" ]; then
+          echo "ERROR: VM_USER is empty!"
+          exit 1
+        fi
+        
+        if [ -z "$VM_PASSWORD" ]; then
+          echo "ERROR: VM_PASSWORD is empty!"
+          exit 1
+        fi
         
         # 增加详细输出
         set -x
         
-        # 测试连接并显示详细信息
-            timeout 30s sshpass -p "$VM_PASSWORD" ssh -v \
-              -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 \
-              -o LogLevel=ERROR \
-              $VM_USER@$VM_HOST \
-              "echo 'SSH连接成功'; whoami; hostname; pwd"
+        # 测试连接 - 修正这一行
+        timeout 30s sshpass -p "$VM_PASSWORD" ssh -v \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          -o LogLevel=ERROR \
+          "$VM_USER@$VM_HOST" \
+          "echo 'SSH连接成功'; whoami; hostname; pwd"
+        
+        # 检查退出码
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -eq 0 ]; then
+          echo "SSH connection test passed"
+        elif [ $EXIT_CODE -eq 124 ]; then
+          echo "ERROR: SSH connection timed out after 30 seconds"
+          exit 1
+        else
+          echo "ERROR: SSH connection failed with exit code $EXIT_CODE"
+          exit 1
+        fi
         
         # 创建目录
         sshpass -p "$VM_PASSWORD" ssh \
