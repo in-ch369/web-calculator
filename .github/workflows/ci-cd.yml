@@ -64,52 +64,9 @@ jobs:
           coverage.xml
         retention-days: 7
 
-  verify-image-push:
-    name: Verify Image Push
-    needs: test
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/'))
-    
-    steps:
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.CR_PAT }}
-    
-    - name: Check image in registry
-      run: |
-        # 获取短 SHA
-        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-        IMAGE_TAG="sha-$SHORT_SHA"
-        FULL_IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
-        
-        echo "🔍 Checking image: $FULL_IMAGE_NAME"
-        
-        # 使用 crane 或 curl 检查镜像是否存在
-        if which crane >/dev/null 2>&1; then
-          crane digest $FULL_IMAGE_NAME && echo "✅ Image exists (checked with crane)"
-        else
-          # 使用 curl 检查 GHCR API
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $(echo -n ${{ secrets.CR_PAT }} | base64)" \
-            "https://ghcr.io/v2/${{ github.repository }}/manifests/$IMAGE_TAG")
-          
-          if [ "$RESPONSE" = "200" ]; then
-            echo "✅ Image exists in registry (HTTP 200)"
-          else
-            echo "❌ Image not found (HTTP $RESPONSE)"
-            echo "Available tags:"
-            curl -s -H "Authorization: Bearer $(echo -n ${{ secrets.CR_PAT }} | base64)" \
-              "https://ghcr.io/v2/${{ github.repository }}/tags/list" | jq . || true
-            exit 1
-          fi
-        fi
-
   build:
     name: Build and Push Docker Image
-    needs: [test, verify-image-push]
+    needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/'))
   
@@ -150,184 +107,17 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: |
           GIT_COMMIT=${{ github.sha }}
-    
-    - name: Verify push with retry
-      if: github.event_name != 'pull_request'
-      run: |
-        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-        IMAGE_TAG="sha-$SHORT_SHA"
-        FULL_IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
-        
-        echo "🔍 Verifying image push: $FULL_IMAGE_NAME"
-        
-        # 重试机制
-        max_retries=5
-        retry_count=0
-        
-        while [ $retry_count -lt $max_retries ]; do
-          echo "Attempt $((retry_count + 1)) of $max_retries"
           
-          if docker pull $FULL_IMAGE_NAME 2>/dev/null; then
-            echo "✅ Successfully pulled image after $((retry_count + 1)) attempts"
-            echo "Image details:"
-            docker inspect $FULL_IMAGE_NAME --format='{{.RepoTags}} {{.Size}}'
-            break
-          else
-            echo "⚠️ Pull failed, retrying in 3 seconds..."
-            retry_count=$((retry_count + 1))
-            sleep 3
-          fi
-        done
-        
-        if [ $retry_count -eq $max_retries ]; then
-          echo "❌ Failed to verify image push after $max_retries attempts"
-          
-          # 列出可用的镜像标签
-          echo "Available tags for ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:"
-          curl -s -H "Authorization: Bearer $(echo -n ${{ secrets.CR_PAT }} | base64)" \
-            "https://ghcr.io/v2/${{ github.repository }}/tags/list" | jq -r '.tags[]' | head -20 || true
-          
-          exit 1
-        fi
-
-  pre-deploy-check:
-    name: Pre-Deployment Checks
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - name: Generate deployment tag
-      id: vars
-      run: |
-        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-        echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
-        echo "DEPLOY_TAG=sha-$SHORT_SHA" >> $GITHUB_ENV
-        echo "IMAGE_FULL_NAME=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$SHORT_SHA" >> $GITHUB_ENV
-        
-        echo "📋 Deployment Info:"
-        echo "SHA: ${{ github.sha }}"
-        echo "Short SHA: $SHORT_SHA"
-        echo "Deploy Tag: sha-$SHORT_SHA"
-        echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$SHORT_SHA"
-    
-    - name: Test VM connectivity
-      env:
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
-        VM_HOST: ${{ secrets.VM_HOST }}
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-      run: |
-        echo "🔌 Testing VM connectivity..."
-        
-        # 测试基本连接
-        if ping -c 3 -W 2 "$VM_HOST" > /dev/null 2>&1; then
-          echo "✅ Ping successful"
-        else
-          echo "⚠️ Ping failed, continuing anyway..."
-        fi
-        
-        # 测试 SSH 连接
-        echo "Testing SSH connection..."
-        timeout 30s sshpass -p "$VM_PASSWORD" ssh \
-          -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=10 \
-          -o BatchMode=yes \
-          -o ServerAliveInterval=60 \
-          "$VM_USER@$VM_HOST" \
-          "echo 'SSH connection successful'; date; uptime"
-        
-        if [ $? -eq 0 ]; then
-          echo "✅ SSH connection established"
-        else
-          echo "❌ SSH connection failed"
-          exit 1
-        fi
-    
-    - name: Check VM Docker status
-      env:
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
-        VM_HOST: ${{ secrets.VM_HOST }}
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-      run: |
-        echo "🐳 Checking Docker status on VM..."
-        
-        sshpass -p "$VM_PASSWORD" ssh \
-          -o StrictHostKeyChecking=no \
-          "$VM_USER@$VM_HOST" "
-          echo '=== Docker Status ==='
-          sudo systemctl status docker --no-pager | head -20
-          echo ''
-          echo '=== Docker Version ==='
-          docker version --format 'Client: {{.Client.Version}}, Server: {{.Server.Version}}' 2>/dev/null || echo 'Docker not available'
-          echo ''
-          echo '=== Disk Space ==='
-          df -h / /var/lib/docker
-        "
-    
-    - name: Test GHCR access from VM
-      env:
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
-        VM_HOST: ${{ secrets.VM_HOST }}
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-        CR_PAT: ${{ secrets.CR_PAT }}
-      run: |
-        echo "🌐 Testing GHCR access from VM..."
-        
-        sshpass -p "$VM_PASSWORD" ssh \
-          -o StrictHostKeyChecking=no \
-          "$VM_USER@$VM_HOST" "
-          set -e
-          
-          echo '1. Testing network connectivity...'
-          if curl -s --max-time 5 https://ghcr.io > /dev/null; then
-            echo '✅ GHCR is reachable'
-          else
-            echo '❌ Cannot reach GHCR'
-            echo 'Trying with different methods:'
-            curl -I --max-time 5 https://ghcr.io || true
-            nslookup ghcr.io || true
-          fi
-          
-          echo ''
-          echo '2. Testing Docker login...'
-          if echo '$CR_PAT' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin; then
-            echo '✅ Docker login successful'
-            
-            echo ''
-            echo '3. Testing image pull...'
-            # 先尝试拉取一个公共镜像测试
-            if docker pull hello-world:latest; then
-              echo '✅ Can pull public images'
-            else
-              echo '❌ Cannot pull public images'
-            fi
-            
-            # 尝试列出我们的镜像（可能失败，但不退出）
-            echo ''
-            echo '4. Checking for existing images...'
-            docker images | grep web-calculator || echo 'No web-calculator images found locally'
-            
-          else
-            echo '❌ Docker login failed'
-            echo 'Possible issues:'
-            echo '- Token might be expired'
-            echo '- Token lacks required permissions'
-            echo '- Network/proxy issues'
-          fi
-          
-          # 退出登录，避免留下凭证
-          docker logout ghcr.io 2>/dev/null || true
-        "
-
   deploy:
     name: Blue-Green Deployment
-    needs: [build, pre-deploy-check]
+    needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     environment:
       name: production
-      url: http://${{ secrets.VM_HOST }}
+      url: http://localhost
+
     
     steps:
     - name: Install sshpass for password login
@@ -338,28 +128,27 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Prepare enhanced deployment script
+    - name: Generate deployment tag
+      id: vars
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "DEPLOY_TAG=sha-$SHORT_SHA" >> $GITHUB_ENV
+        echo "IMAGE_FULL_NAME=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$SHORT_SHA" >> $GITHUB_ENV
+  
+    - name: Prepare deployment script
       run: |
         cat > deploy.sh << 'EOF'
         #!/bin/bash
         set -e
         
-        echo "🚀 Starting blue-green deployment..."
-        echo "📦 Image: ${{ env.IMAGE_FULL_NAME }}"
-        echo "🏷️  Deploy tag: ${{ env.DEPLOY_TAG }}"
+        echo "Starting blue-green deployment..."
+        echo "Image: ${{ env.IMAGE_FULL_NAME }}"
+        echo "Deploy tag: ${{ env.DEPLOY_TAG }}"
         
         cd /opt/web-calculator
         
-        # 确保 Docker Compose 文件存在
-        if [ ! -f docker-compose.yml ]; then
-          echo "❌ docker-compose.yml not found in /opt/web-calculator"
-          ls -la /opt/web-calculator/
-          exit 1
-        fi
-        
         # 检查当前活动颜色
-        if docker-compose ps app_blue 2>/dev/null | grep -q "Up" && \
-           grep -q "max_fails" nginx/conf.d/default.conf 2>/dev/null | grep -q "app_blue"; then
+        if docker-compose ps app_blue | grep -q "Up" && grep -q "max_fails" nginx/conf.d/default.conf | grep -q "app_blue"; then
           CURRENT_COLOR="blue"
           NEXT_COLOR="green"
         else
@@ -367,16 +156,11 @@ jobs:
           NEXT_COLOR="blue"
         fi
         
-        echo "🎯 Current active: $CURRENT_COLOR"
-        echo "🎯 Deploying to: $NEXT_COLOR"
+        echo "Current active: $CURRENT_COLOR"
+        echo "Deploying to: $NEXT_COLOR"
         
-        # 创建或更新环境变量文件
-        cat > .env << EOL
-        GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}
-        DEPLOY_TAG=${{ env.DEPLOY_TAG }}
-        IMAGE_FULL_NAME=${{ env.IMAGE_FULL_NAME }}
-        EOL
-        
+        # 更新环境变量
+        echo "GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}" > .env
         if [ "$NEXT_COLOR" = "blue" ]; then
           echo "BLUE_TAG=${{ env.DEPLOY_TAG }}" >> .env
           echo "GREEN_TAG=latest" >> .env
@@ -385,153 +169,32 @@ jobs:
           echo "GREEN_TAG=${{ env.DEPLOY_TAG }}" >> .env
         fi
         
-        echo "📄 Environment file created:"
-        cat .env
-        
-        # 登录到 GitHub Container Registry
-        echo "🔐 Logging into GHCR..."
-        if echo '${{ secrets.CR_PAT }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin; then
-          echo "✅ Successfully logged into GHCR"
-        else
-          echo "❌ Failed to login to GHCR"
-          
-          # 尝试使用备选方法
-          echo "Trying alternative login method..."
-          docker logout ghcr.io 2>/dev/null || true
-          echo '${{ secrets.CR_PAT }}' | base64 -d | docker login ghcr.io -u '${{ github.actor }}' --password-stdin || {
-            echo "All login attempts failed"
-            exit 1
-          }
-        fi
-        
-        # 验证镜像存在性
-        echo "🔍 Verifying image exists in registry..."
-        MAX_RETRIES=5
-        IMAGE_FOUND=false
-        
-        for i in $(seq 1 $MAX_RETRIES); do
-          echo "Attempt $i/$MAX_RETRIES to verify image..."
-          
-          if docker manifest inspect "${{ env.IMAGE_FULL_NAME }}" > /dev/null 2>&1; then
-            echo "✅ Image found in registry"
-            IMAGE_FOUND=true
-            break
-          else
-            echo "⚠️ Image not found, retrying in 2 seconds..."
-            sleep 2
-          fi
-        done
-        
-        if [ "$IMAGE_FOUND" = false ]; then
-          echo "❌ Image ${{ env.IMAGE_FULL_NAME }} not found after $MAX_RETRIES attempts"
-          echo "Available tags for ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:"
-          
-          # 尝试列出可用标签
-          curl -s -H "Authorization: Bearer $(echo -n '${{ secrets.CR_PAT }}' | base64)" \
-            "https://ghcr.io/v2/${{ github.repository }}/tags/list" 2>/dev/null | \
-            jq -r '.tags[]' 2>/dev/null | head -10 || echo "Could not list tags"
-          
-          # 尝试拉取 latest 作为备选
-          echo "Trying to pull latest tag instead..."
-          LATEST_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          if docker manifest inspect "$LATEST_IMAGE" > /dev/null 2>&1; then
-            echo "✅ Latest image found, using it instead"
-            sed -i "s|${{ env.DEPLOY_TAG }}|latest|g" .env
-          else
-            echo "❌ No suitable image found"
-            exit 1
-          fi
-        fi
-        
-        # 拉取新镜像（带重试机制）
-        echo "⬇️  Pulling new image for app_${NEXT_COLOR}..."
-        PULL_SUCCESS=false
-        
-        for i in $(seq 1 3); do
-          echo "Pull attempt $i/3..."
-          if docker-compose pull app_${NEXT_COLOR}; then
-            echo "✅ Image pulled successfully"
-            PULL_SUCCESS=true
-            break
-          else
-            echo "⚠️ Pull failed, retrying in 3 seconds..."
-            sleep 3
-          fi
-        done
-        
-        if [ "$PULL_SUCCESS" = false ]; then
-          echo "❌ Failed to pull image after 3 attempts"
-          echo "Trying direct docker pull..."
-          
-          if [ "$NEXT_COLOR" = "blue" ]; then
-            IMAGE_TO_PULL=$(grep BLUE_TAG .env | cut -d= -f2)
-          else
-            IMAGE_TO_PULL=$(grep GREEN_TAG .env | cut -d= -f2)
-          fi
-          
-          FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TO_PULL"
-          echo "Pulling $FULL_IMAGE directly..."
-          
-          if docker pull "$FULL_IMAGE"; then
-            echo "✅ Direct pull successful"
-          else
-            echo "❌ All pull attempts failed"
-            exit 1
-          fi
-        fi
-        
-        # 显示拉取的镜像
-        echo "📋 Pulled images:"
-        docker images | grep "${{ env.IMAGE_NAME }}" | head -5
+        # 拉取新镜像
+        echo "Pulling new image..."
+        docker-compose pull app_${NEXT_COLOR}
         
         # 启动新版本
-        echo "🚀 Starting new version (app_${NEXT_COLOR})..."
+        echo "Starting new version..."
         docker-compose up -d app_${NEXT_COLOR}
         
         # 等待健康检查
-        echo "🏥 Waiting for health check..."
+        echo "Waiting for health check..."
         MAX_RETRIES=30
-        HEALTHY=false
-        
         for i in $(seq 1 $MAX_RETRIES); do
-          echo "Health check attempt $i/$MAX_RETRIES..."
-          
-          if docker-compose ps app_${NEXT_COLOR} 2>/dev/null | grep -q "(healthy)"; then
-            echo "✅ New version is healthy"
-            HEALTHY=true
+          if docker-compose ps app_${NEXT_COLOR} | grep -q "(healthy)"; then
+            echo "New version is healthy"
             break
           fi
-          
-          # 检查容器状态
-          CONTAINER_STATUS=$(docker-compose ps app_${NEXT_COLOR} 2>/dev/null | tail -1)
-          echo "Container status: $CONTAINER_STATUS"
-          
-          if echo "$CONTAINER_STATUS" | grep -q "Exit\|exited"; then
-            echo "❌ Container exited, checking logs..."
-            docker-compose logs app_${NEXT_COLOR} | tail -20
-            exit 1
-          fi
-          
           if [ $i -eq $MAX_RETRIES ]; then
-            echo "❌ Health check failed after $MAX_RETRIES attempts"
-            echo "Container logs:"
-            docker-compose logs app_${NEXT_COLOR} | tail -30
+            echo "Health check failed after $MAX_RETRIES attempts"
             exit 1
           fi
-          
+          echo "Attempt $i/$MAX_RETRIES: Waiting..."
           sleep 2
         done
         
-        if [ "$HEALTHY" = false ]; then
-          echo "⚠️ Health check inconclusive, but proceeding..."
-        fi
-        
         # 切换流量
-        echo "🔄 Switching traffic..."
-        
-        # 备份原始配置
-        cp nginx/conf.d/default.conf nginx/conf.d/default.conf.backup
-        
+        echo "Switching traffic..."
         if [ "$NEXT_COLOR" = "green" ]; then
           sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
           sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
@@ -540,271 +203,169 @@ jobs:
           sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
         fi
         
-        echo "📝 New nginx configuration:"
-        grep "server app_" nginx/conf.d/default.conf
-        
         # 重新加载Nginx
-        echo "🔄 Reloading nginx..."
-        if docker-compose exec -T proxy nginx -s reload; then
-          echo "✅ Nginx reloaded successfully"
-        else
-          echo "⚠️ Nginx reload failed, trying restart..."
-          docker-compose restart proxy
-        fi
+        echo "Reloading nginx..."
+        docker-compose exec -T proxy nginx -s reload
         
-        # 等待旧版本停止
-        echo "⏳ Waiting before stopping old version..."
-        sleep 30
-        
-        echo "🛑 Stopping old version (app_${CURRENT_COLOR})..."
-        docker-compose stop app_${CURRENT_COLOR} || echo "Warning: Could not stop old version"
+        # 等待旧版本停止（可选）
+        echo "Stopping old version in 60 seconds..."
+        (sleep 60 && docker-compose stop app_${CURRENT_COLOR}) &
         
         # 验证部署
-        echo "✅ Verifying deployment..."
-        sleep 10
-        
-        MAX_VERIFY_RETRIES=10
-        for i in $(seq 1 $MAX_VERIFY_RETRIES); do
-          echo "Verification attempt $i/$MAX_VERIFY_RETRIES..."
-          
-          if curl -f -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost/health; then
-            RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost/health)
-            if [ "$RESPONSE_CODE" = "200" ]; then
-              echo "✅ Deployment successful! (HTTP 200)"
-              echo "🎉 Active version: $NEXT_COLOR"
-              echo "🖼️  Using image: ${{ env.IMAGE_FULL_NAME }}"
-              break
-            else
-              echo "⚠️ Health check returned HTTP $RESPONSE_CODE"
-            fi
-          else
-            echo "⚠️ Health check failed, retrying..."
-          fi
-          
-          if [ $i -eq $MAX_VERIFY_RETRIES ]; then
-            echo "❌ Deployment verification failed after $MAX_VERIFY_RETRIES attempts"
-            echo "Last curl attempt failed"
-          fi
-          
-          sleep 3
-        done
-        
-        # 清理旧的镜像
-        echo "🧹 Cleaning up old images..."
-        docker image prune -f --filter "until=24h" || echo "Image prune failed"
-        
-        # 登出 GHCR
-        docker logout ghcr.io 2>/dev/null || true
-        
-        echo "✨ Deployment process completed!"
+        echo "Verifying deployment..."
+        sleep 5
+        RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)
+        if [ "$RESPONSE" = "200" ]; then
+          echo "✅ Deployment successful!"
+          echo "Active version: $NEXT_COLOR"
+        else
+          echo "❌ Deployment verification failed"
+          exit 1
+        fi
         EOF
         
         chmod +x deploy.sh
-        echo "📋 Deployment script created with $(wc -l deploy.sh | cut -d' ' -f1) lines"
+
+    - name: Check network connectivity
+      run: |
+        echo "检查网络连通性..."
+        
+        # 测试ping
+        if ping -c 1 -W 5 "$VM_HOST" 2>/dev/null; then
+          echo "✓ Ping成功"
+        else
+          echo "✗ Ping失败"
+        fi
+        
+        # 测试端口
+        if nc -zv -w 5 "$VM_HOST" 22 2>/dev/null; then
+          echo "✓ 端口22可达"
+        else
+          echo "✗ 端口22不可达"
+        fi
+        
+        # 测试DNS
+        nslookup "$VM_HOST" 2>/dev/null || echo "DNS解析失败"
     
-    - name: Copy files to VM
+    - name: Test SSH connection to VM
       env:
         VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
         VM_HOST: ${{ secrets.VM_HOST }}
         VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
       run: |
-        echo "📤 Copying files to VM..."
+        echo "Testing connection to $VM_USER@$VM_HOST..."
         
-        # 创建必要的目录结构
+        # 增加详细输出
+        set -x
+        
+        # 测试连接 - 这一行完全修正
+        timeout 30s sshpass -p "$VM_PASSWORD" ssh -vvv \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          -o LogLevel=ERROR \
+          "$VM_USER@$VM_HOST" \
+          "echo 'SSH连接成功'; whoami; hostname; pwd"
+        
+        if [ $? -eq 0 ]; then
+          echo "SSH连接测试成功"
+        else
+          echo "SSH连接测试失败"
+          exit 1
+        fi
+        
+        # 创建目录
         sshpass -p "$VM_PASSWORD" ssh \
           -o StrictHostKeyChecking=no \
-          "$VM_USER@$VM_HOST" "
-          sudo mkdir -p /opt/web-calculator/nginx/conf.d
-          sudo chown -R $VM_USER:$VM_USER /opt/web-calculator
-          ls -la /opt/web-calculator/
-        "
+          -o ConnectTimeout=10 \
+          $VM_USER@${{ secrets.VM_HOST }} \
+          "sudo mkdir -p /opt/web-calculator && sudo chown -R $VM_USER:$VM_USER /opt/web-calculator"
         
-        # 复制部署脚本
-        echo "Copying deploy.sh..."
+        # 复制文件
         sshpass -p "$VM_PASSWORD" scp \
           -o StrictHostKeyChecking=no \
           -o ConnectTimeout=10 \
-          deploy.sh "$VM_USER@$VM_HOST:/tmp/deploy.sh"
+          deploy.sh $VM_USER@${{ secrets.VM_HOST }}:/tmp/deploy.sh
         
-        # 复制 docker-compose.yml
-        if [ -f "docker-compose.yml" ]; then
-          echo "Copying docker-compose.yml..."
-          sshpass -p "$VM_PASSWORD" scp \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=10 \
-            docker-compose.yml "$VM_USER@$VM_HOST:/opt/web-calculator/"
-        fi
+        sshpass -p "$VM_PASSWORD" scp \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          docker-compose.yml $VM_USER@${{ secrets.VM_HOST }}:/opt/web-calculator/
         
-        # 复制 nginx 配置
-        if [ -f "nginx/conf.d/default.conf" ]; then
-          echo "Copying nginx configuration..."
-          sshpass -p "$VM_PASSWORD" scp \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=10 \
-            nginx/conf.d/default.conf "$VM_USER@$VM_HOST:/opt/web-calculator/nginx/conf.d/"
-        fi
+        # 复制 nginx 配置，确保目录存在
+        sshpass -p "$VM_PASSWORD" ssh \
+          -o StrictHostKeyChecking=no \
+          $VM_USER@${{ secrets.VM_HOST }} \
+          "mkdir -p /opt/web-calculator/nginx/conf.d"
         
-        echo "✅ Files copied successfully"
+        sshpass -p "$VM_PASSWORD" scp \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          nginx/conf.d/default.conf \
+          $VM_USER@${{ secrets.VM_HOST }}:/opt/web-calculator/nginx/conf.d/
+        
+        echo "文件复制完成"
     
     - name: Execute deployment
       env:
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
-        VM_HOST: ${{ secrets.VM_HOST }}
         VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
       run: |
-        echo "🚀 Executing deployment on $VM_USER@$VM_HOST..."
-        
-        set -x
-        
-        # 执行部署脚本，带有详细输出
-        sshpass -p "$VM_PASSWORD" ssh \
-          -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=30 \
-          -o ServerAliveInterval=60 \
-          -o ServerAliveCountMax=10 \
-          "$VM_USER@$VM_HOST" "
-          set -e
-          echo '=== Starting deployment script ==='
-          cat /tmp/deploy.sh | head -20
-          echo '...'
-          bash /tmp/deploy.sh
-        "
-        
-        DEPLOY_EXIT_CODE=$?
-        
-        if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
-          echo "✅ Deployment executed successfully"
-        else
-          echo "❌ Deployment failed with exit code $DEPLOY_EXIT_CODE"
-          
-          # 获取失败日志
-          echo "=== Checking deployment logs ==="
-          sshpass -p "$VM_PASSWORD" ssh \
-            -o StrictHostKeyChecking=no \
-            "$VM_USER@$VM_HOST" "
-            echo '=== Last 50 lines of docker logs ==='
-            docker-compose logs --tail=50 2>/dev/null || echo 'Could not get docker logs'
-            echo ''
-            echo '=== Docker container status ==='
-            docker-compose ps 2>/dev/null || docker ps | grep web-calculator || true
-          "
-          
-          exit $DEPLOY_EXIT_CODE
-        fi
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "bash /tmp/deploy.sh"
     
     - name: Create rollback script on VM
-      env:
-        VM_USER: ${{ secrets.VM_USER || 'ubuntu' }}
-        VM_HOST: ${{ secrets.VM_HOST }}
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
       run: |
-        echo "🔄 Creating rollback script..."
-        
         cat > rollback.sh << 'EOF'
         #!/bin/bash
         set -e
         
-        echo "🔙 Starting rollback procedure..."
-        
         cd /opt/web-calculator
         
-        if [ ! -f "nginx/conf.d/default.conf.backup" ]; then
-          echo "❌ No backup configuration found"
-          echo "Current configuration:"
-          grep "server app_" nginx/conf.d/default.conf || true
-          exit 1
-        fi
-        
-        echo "📋 Restoring nginx configuration from backup..."
-        cp nginx/conf.d/default.conf.backup nginx/conf.d/default.conf
-        
-        echo "🔄 Reloading nginx..."
-        docker-compose exec -T proxy nginx -s reload || docker-compose restart proxy
-        
-        # 确定要启动哪个版本
+        # 检查当前活动颜色
         if grep -q "app_blue.*max_fails" nginx/conf.d/default.conf; then
-          START_COLOR="blue"
-          STOP_COLOR="green"
+          CURRENT="blue"
+          PREVIOUS="green"
         else
-          START_COLOR="green"
-          STOP_COLOR="blue"
+          CURRENT="green"
+          PREVIOUS="blue"
         fi
         
-        echo "🚀 Starting $START_COLOR version..."
-        docker-compose start app_${START_COLOR} || docker-compose up -d app_${START_COLOR}
+        echo "Rolling back from $CURRENT to $PREVIOUS"
         
-        echo "🛑 Stopping $STOP_COLOR version..."
-        docker-compose stop app_${STOP_COLOR} 2>/dev/null || true
+        # 切换回上一个版本
+        if [ "$PREVIOUS" = "green" ]; then
+          sed -i 's/server app_blue:5000 max_fails=1 fail_timeout=5s;/server app_blue:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_green:5000;/server app_green:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        else
+          sed -i 's/server app_green:5000 max_fails=1 fail_timeout=5s;/server app_green:5000;/' nginx/conf.d/default.conf
+          sed -i 's/server app_blue:5000;/server app_blue:5000 max_fails=1 fail_timeout=5s;/' nginx/conf.d/default.conf
+        fi
         
-        echo "✅ Rollback completed to $START_COLOR version"
+        # 启动上一个版本（如果已停止）
+        docker-compose start app_${PREVIOUS}
         
-        # 验证
-        sleep 5
-        echo "🔍 Verifying rollback..."
-        curl -s -o /dev/null -w "HTTP: %{http_code}\n" http://localhost/health || echo "Health check failed"
+        # 重新加载Nginx
+        docker-compose exec -T proxy nginx -s reload
+        
+        echo "Rollback completed to $PREVIOUS version"
         EOF
         
         chmod +x rollback.sh
-        
-        # 复制到 VM
-        sshpass -p "$VM_PASSWORD" scp \
-          -o StrictHostKeyChecking=no \
-          rollback.sh "$VM_USER@$VM_HOST:/opt/web-calculator/rollback.sh"
-        
-        echo "✅ Rollback script created and copied"
+        scp -o StrictHostKeyChecking=no rollback.sh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/web-calculator/rollback.sh
 
   notification:
     name: Send Notification
-    needs: [test, build, pre-deploy-check, deploy]
+    needs: [test, build, deploy]
     runs-on: ubuntu-latest
     if: always()
     
     steps:
-    - name: Determine deployment status
-      id: check-status
-      run: |
-        if ${{ needs.deploy.result == 'success' }}; then
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "message=✅ CI/CD Pipeline completed successfully!" >> $GITHUB_OUTPUT
-        elif ${{ needs.deploy.result == 'failure' }}; then
-          echo "status=failure" >> $GITHUB_OUTPUT
-          echo "message=❌ CI/CD Pipeline failed at deployment stage!" >> $GITHUB_OUTPUT
-        elif ${{ needs.build.result == 'failure' }}; then
-          echo "status=failure" >> $GITHUB_OUTPUT
-          echo "message=❌ CI/CD Pipeline failed at build stage!" >> $GITHUB_OUTPUT
-        else
-          echo "status=other" >> $GITHUB_OUTPUT
-          echo "message=⚠️ CI/CD Pipeline completed with unknown status" >> $GITHUB_OUTPUT
-        fi
-    
     - name: Send success notification
-      if: steps.check-status.outputs.status == 'success'
+      if: success()
       run: |
-        echo "${{ steps.check-status.outputs.message }}"
-        echo "🌐 Application URL: http://${{ secrets.VM_HOST }}"
-        echo "📊 GitHub Actions Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        echo "🏷️  Deployed Tag: ${{ env.DEPLOY_TAG }}"
+        echo "✅ CI/CD Pipeline completed successfully!"
+        echo "Deployment URL: http://${{ secrets.VM_HOST }}"
     
     - name: Send failure notification
-      if: steps.check-status.outputs.status == 'failure'
+      if: failure()
       run: |
-        echo "${{ steps.check-status.outputs.message }}"
-        echo "🔍 Check logs at: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        echo "💡 For rollback, SSH to VM and run: /opt/web-calculator/rollback.sh"
-        echo "🌐 Current VM: ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}"
-        
-        # 提供诊断命令
-        echo ""
-        echo "📋 Diagnostic commands:"
-        echo "1. Check Docker: ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} 'docker ps'"
-        echo "2. Check logs: ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} 'cd /opt/web-calculator && docker-compose logs'"
-        echo "3. Check nginx: ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} 'cd /opt/web-calculator && cat nginx/conf.d/default.conf'"
-    
-    - name: Send other notification
-      if: steps.check-status.outputs.status == 'other'
-      run: |
-        echo "${{ steps.check-status.outputs.message }}"
-        echo "Workflow result:"
-        echo "- Test: ${{ needs.test.result }}"
-        echo "- Build: ${{ needs.build.result }}"
-        echo "- Deploy: ${{ needs.deploy.result }}"
+        echo "❌ CI/CD Pipeline failed!"
+        echo "Check GitHub Actions logs for details."
