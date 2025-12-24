@@ -94,161 +94,49 @@ jobs:
     if: github.ref == 'refs/heads/main'
     
     steps:
-    - name: Install sshpass
-      run: sudo apt-get install -y sshpass
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
     
-    - name: Create deployment script
-      run: |
-        cat > deploy.sh << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        echo "开始部署流程..."
-        
-        # 登录到容器仓库
-        echo "登录到GitHub容器仓库..."
-        echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-        
-        # 拉取镜像（带重试机制）
-        echo "拉取最新镜像..."
-        IMAGE_NAME="ghcr.io/${{ github.repository }}:latest"
-        
-        MAX_RETRIES=3
-        RETRY_DELAY=10
-        
-        for i in $(seq 1 $MAX_RETRIES); do
-          echo "尝试 $i/$MAX_RETRIES..."
+    - name: Deploy via SSH Action
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        script_stop: true
+        timeout: 600
+        command_timeout: 300
+        script: |
+          set -e
           
-          if docker pull "$IMAGE_NAME"; then
-            echo "✅ 镜像拉取成功"
-            break
+          echo "开始部署..."
+          
+          # 登录到容器仓库
+          echo '${{ secrets.CR_PAT }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          
+          # 拉取镜像
+          echo "拉取镜像..."
+          docker pull ghcr.io/${{ github.repository }}:latest
+          
+          # 重启服务
+          cd /opt/web-calculator
+          docker-compose down
+          docker-compose up -d
+          
+          # 验证
+          echo "等待服务启动..."
+          sleep 15
+          
+          if curl -s -f http://localhost:5000/health; then
+            echo "✅ 部署成功"
           else
-            echo "❌ 拉取失败，等待 ${RETRY_DELAY}秒后重试..."
-            if [ $i -eq $MAX_RETRIES ]; then
-              echo "重试次数用尽，部署失败"
-              exit 1
-            fi
-            sleep $RETRY_DELAY
+            echo "❌ 部署失败，查看日志..."
+            docker-compose logs --tail=20
+            exit 1
           fi
-        done
-        
-        # 检查镜像
-        echo "验证镜像..."
-        docker images | grep "${{ github.repository }}"
-        
-        # 重启服务
-        echo "重启服务..."
-        cd /opt/web-calculator
-        
-        # 停止旧容器
-        docker-compose down || true
-        
-        # 启动新容器
-        docker-compose up -d
-        
-        # 等待服务启动
-        echo "等待服务启动..."
-        sleep 15
-        
-        # 验证服务
-        echo "验证服务状态..."
-        if curl -s -f http://localhost:5000/health > /dev/null; then
-          echo "✅ 部署成功！"
-        else
-          echo "❌ 服务未响应"
-          
-          # 查看容器状态
-          echo "容器状态："
-          docker-compose ps
-          
-          # 查看日志
-          echo "应用日志："
-          docker-compose logs --tail=20
-          
-          exit 1
-        fi
-        EOF
-        
-        chmod +x deploy.sh
-    
-    - name: Copy script to VM
-      env:
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-      run: |
-        # 使用scp复制脚本
-        sshpass -p "$VM_PASSWORD" scp \
-          -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=30 \
-          deploy.sh \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/deploy.sh
-        
-        echo "脚本复制完成"
-    
-    - name: Execute deployment script
-      env:
-        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-      run: |
-        # 使用nohup防止断开
-        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=30 \
-          -o ServerAliveInterval=60 \
-          -o TCPKeepAlive=yes \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "nohup bash /tmp/deploy.sh > /tmp/deploy.log 2>&1 &"
-        
-        # 等待部署完成
-        echo "等待部署执行..."
-        sleep 5
-        
-        # 检查部署状态
-        MAX_CHECKS=12  # 最多等待60秒
-        for i in $(seq 1 $MAX_CHECKS); do
-          echo "检查部署状态 ($i/$MAX_CHECKS)..."
-          
-          # 检查部署脚本是否还在运行
-          if sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "ps aux | grep -v grep | grep -q 'deploy.sh'" 2>/dev/null; then
-            echo "部署还在进行中..."
-            sleep 5
-            continue
-          else
-            echo "部署脚本执行完毕"
-            break
-          fi
-          
-          if [ $i -eq $MAX_CHECKS ]; then
-            echo "⚠️  部署可能还在进行中"
-          fi
-        done
-        
-        # 获取部署日志
-        echo "=== 部署日志 ==="
-        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no \
-          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-          "tail -50 /tmp/deploy.log" || echo "无法获取日志"
-    
-    - name: Verify final deployment
-      env:
-        VM_HOST: ${{ secrets.VM_HOST }}
-      run: |
-        echo "最终验证..."
-        
-        MAX_ATTEMPTS=10
-        for i in $(seq 1 $MAX_ATTEMPTS); do
-          echo "验证尝试 $i/$MAX_ATTEMPTS..."
-          
-          if curl -s -f --max-time 10 "http://$VM_HOST/health" > /dev/null; then
-            echo "✅ 服务正常运行"
-            exit 0
-          fi
-          
-          echo "服务未就绪，等待5秒..."
-          sleep 5
-        done
-        
-        echo "❌ 服务最终验证失败"
-        exit 1
 
   notification:
     name: Send Notification
