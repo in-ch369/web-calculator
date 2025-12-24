@@ -1,4 +1,4 @@
-name: Web Calculator CI/CD
+name: Web Calculator
 
 on:
   push:
@@ -86,3 +86,22 @@ jobs:
           "cd /opt/web-calculator && docker-compose down && docker-compose up -d"
         
         echo "✅ Deployment completed"
+
+  notification:
+    name: Send Notification
+    needs: [test, build, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Send success notification
+      if: success()
+      run: |
+        echo "✅ CI/CD Pipeline completed successfully!"
+        echo "Deployment URL: http://${{ secrets.VM_HOST }}"
+    
+    - name: Send failure notification
+      if: failure()
+      run: |
+        echo "❌ CI/CD Pipeline failed!"
+        echo "Check GitHub Actions logs for details."
