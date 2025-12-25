@@ -3,7 +3,7 @@ version: '3.8'
 services:
   
   app_blue:
-    image: ghcr.io/in-ch369/web-calculator:latest
+    image: ghcr.io/in-ch369/web-calculator:sha-${{ github.sha }}
     container_name: web-calculator-blue
     restart: always
     environment:
@@ -12,7 +12,7 @@ services:
       - webcalc-network
     
   app_green:
-    image: ghcr.io/in-ch369/web-calculator:latest
+    image: ghcr.io/in-ch369/web-calculator:sha-${{ github.sha }}
     container_name: web-calculator-green
     restart: always
     environment:
