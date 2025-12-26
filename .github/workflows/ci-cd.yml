@@ -166,9 +166,8 @@ jobs:
         
         # 拉取镜像
         IMAGE="ghcr.io/${{ github.repository }}"
-        echo "拉取镜像: latest 和 ${{ github.sha }}"
+        echo "拉取镜像: latest"
         docker pull "$IMAGE":latest
-        docker pull "$IMAGE":${{ github.sha }}
         
         # 停止旧服务
         docker-compose down 2>/dev/null || true
