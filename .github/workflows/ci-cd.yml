@@ -84,9 +84,9 @@ jobs:
 
     - name: Build and push
       run: |
-        docker build -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:sha-1d08513 .
+        docker build -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:latest .
         docker push ghcr.io/${{ github.repository }}:latest
-        docker push ghcr.io/${{ github.repository }}:sha-1d08513
+        docker push ghcr.io/${{ github.repository }}:latest
 
   deploy:
     name: Deploy to VM
@@ -112,7 +112,7 @@ jobs:
         echo "      蓝绿部署开始"
         echo "========================================"
         echo "部署时间: $(date)"
-        echo "镜像版本: sha-1d08513"
+        echo "镜像版本: latest"
         echo "蓝色端口: 5000"
         echo "绿色端口: 5001"
         echo ""
@@ -133,9 +133,9 @@ jobs:
         echo "✅ 拉取latest镜像成功"
         
         # 拉取commit版本（用于蓝色容器）
-        echo "拉取commit版本镜像: sha-1d08513"
-        docker pull "$IMAGE":sha-1d08513
-        echo "✅ 拉取sha-1d08513镜像成功"
+        echo "拉取commit版本镜像: latest"
+        docker pull "$IMAGE":latest
+        echo "✅ 拉取latest镜像成功"
         echo ""
         
         # 3. 停止旧服务
@@ -219,7 +219,7 @@ jobs:
         echo "✅ 蓝绿部署成功完成"
         echo ""
         echo "🔵 蓝色容器:"
-        echo "   镜像: ghcr.io/${{ github.repository }}:sha-1d08513"
+        echo "   镜像: ghcr.io/${{ github.repository }}:latest"
         echo "   端口: 5000"
         echo "   访问: http://$IP:5000/health"
         echo ""
