@@ -102,12 +102,22 @@ jobs:
       run: |
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
-        # 将 SSH 私钥写入文件
-        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        
+        # 使用更安全的方式写入私钥
+        cat > ~/.ssh/id_rsa << 'EOF'
+        ${{ secrets.VM_SSH_PRIVATE_KEY }}
+        EOF
+        
         chmod 600 ~/.ssh/id_rsa
+        
         # 添加目标主机到 known_hosts
         ssh-keyscan -H $VM_HOST >> ~/.ssh/known_hosts
         chmod 600 ~/.ssh/known_hosts
+        
+        # 测试 SSH 连接
+        echo "测试 SSH 连接..."
+        ssh -o BatchMode=yes -o ConnectTimeout=5 $VM_USER@$VM_HOST "echo 'SSH连接成功'" || echo "SSH测试失败"
+        
         echo "SSH配置完成"
     
     - name: Create deployment script
