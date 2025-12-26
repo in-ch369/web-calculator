@@ -226,7 +226,7 @@ jobs:
         echo "获取容器状态..."
         ssh $VM_USER@$VM_HOST "docker ps --filter 'name=webcalc' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 
-    verification:
+  verification:
       name: Verify Deployment
       needs: deploy
       runs-on: ubuntu-latest
