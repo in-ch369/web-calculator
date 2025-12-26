@@ -3,7 +3,7 @@ version: '3.8'
 services:
           
   app_blue:
-    image: ghcr.io/${{ github.repository }}:sha-1d08513
+    image: ghcr.io/${{ github.repository }}:latest
     container_name: webcalc_blue
     restart: unless-stopped
     ports:
@@ -13,7 +13,7 @@ services:
       - FLASK_RUN_HOST=0.0.0.0
       - FLASK_RUN_PORT=5000
       - CONTAINER_COLOR=blue
-      - DEPLOYMENT_SHA=sha-1d08513
+      - DEPLOYMENT_SHA=latest
     networks:
      - webcalc-network
     healthcheck:
